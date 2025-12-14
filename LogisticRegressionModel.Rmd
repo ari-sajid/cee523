@@ -34,9 +34,24 @@ set.seed(123)
 # 2. Data Loading
 
 ```{r data-loading}
+# Check if zip file exists
+if (!file.exists("TrajectoryData.zip")) {
+  stop("TrajectoryData.zip not found in the project directory!")
+}
+
 # Unzip the data if not already extracted
 if (!dir.exists("TrajectoryData")) {
-  unzip("TrajectoryData.zip")
+  cat("Extracting TrajectoryData.zip...\n")
+  unzip("TrajectoryData.zip", exdir = ".")
+  cat("Extraction complete!\n")
+}
+
+# Verify data files exist
+if (!file.exists("TrajectoryData/0750am-0805am.csv")) {
+  stop("Training data file not found after extraction!")
+}
+if (!file.exists("TrajectoryData/0820am-0835am.csv")) {
+  stop("Testing data file not found after extraction!")
 }
 
 # Load Training Data with only required columns
@@ -91,66 +106,69 @@ cat("Testing data loaded:", nrow(test_data), "rows\n")
 ```{r train-feature-engineering}
 cat("Engineering features for training data...\n")
 
-# Self-join to link subject vehicle with preceding vehicle
-train_processed <- train_data %>%
-  # Rename columns for subject vehicle
+# NGSIM data is at 10 Hz (10 frames/sec)
+# 2 seconds ahead = 20 frames
+DELTA_T_FRAMES <- 20
+TTC_THRESHOLD <- 4.0
+
+# Self-join to get current features
+train_features <- train_data %>%
   rename(
     Vehicle_ID_Subject = Vehicle_ID,
     v_Vel_Subject = v_Vel,
     v_Acc_Subject = v_Acc,
     v_Length_Subject = v_Length,
     Space_Hdwy_Subject = Space_Hdwy,
+    Lane_ID_Subject = Lane_ID,
     Preceeding_ID = Preceeding
   ) %>%
-  # Join with lead vehicle data
   inner_join(
     train_data %>%
-      select(
-        Vehicle_ID,
-        Frame_ID,
-        v_Vel,
-        v_Length
-      ) %>%
-      rename(
-        Preceeding_ID = Vehicle_ID,
-        v_Vel_Lead = v_Vel,
-        v_Length_Lead = v_Length
-      ),
+      select(Vehicle_ID, Frame_ID, v_Vel, v_Length) %>%
+      rename(Preceeding_ID = Vehicle_ID, v_Vel_Lead = v_Vel, v_Length_Lead = v_Length),
     by = c("Preceeding_ID", "Frame_ID")
   ) %>%
-  # Calculate derived features
   mutate(
-    # Relative Speed (positive = closing the gap)
     Relative_Speed = v_Vel_Subject - v_Vel_Lead,
-
-    # Actual Gap (bumper-to-bumper distance)
     Actual_Gap = Space_Hdwy_Subject - (v_Length_Subject / 2) - (v_Length_Lead / 2),
+    TTC_current = Actual_Gap / Relative_Speed
+  )
 
-    # Time-To-Collision
-    TTC = Actual_Gap / Relative_Speed,
+# Self-join to get future TTC for label construction
+# For each observation at time t, get TTC at time t + DELTA_T_FRAMES
+train_future <- train_features %>%
+  select(Vehicle_ID_Subject, Frame_ID, Preceeding_ID, TTC_current) %>%
+  mutate(Frame_ID_past = Frame_ID - DELTA_T_FRAMES) %>%
+  rename(TTC_future = TTC_current)
 
-    # High Risk Target Variable
+train_processed <- train_features %>%
+  left_join(
+    train_future %>% select(Vehicle_ID_Subject, Frame_ID_past, TTC_future),
+    by = c("Vehicle_ID_Subject" = "Vehicle_ID_Subject", "Frame_ID" = "Frame_ID_past")
+  ) %>%
+  # Label: will TTC be < threshold in 2 seconds?
+  mutate(
     is_high_risk = if_else(
-      TTC > 0 & TTC < 4.0,
+      !is.na(TTC_future) & TTC_future > 0 & TTC_future < TTC_THRESHOLD,
       1,
       0
     )
   ) %>%
-  # Select final columns
+  # Features at time t
   select(
     v_Vel = v_Vel_Subject,
     v_Acc = v_Acc_Subject,
-    Actual_Gap,
+    Space_Hdwy = Space_Hdwy_Subject,
     Relative_Speed,
-    TTC,
+    Lane_ID = Lane_ID_Subject,
+    TTC_current,
     is_high_risk
   ) %>%
-  # Remove invalid rows
   filter(
-    !is.na(TTC),
-    !is.infinite(TTC),
+    !is.na(TTC_current),
+    !is.infinite(TTC_current),
     !is.na(is_high_risk),
-    !is.na(Actual_Gap),
+    !is.na(Space_Hdwy),
     !is.na(Relative_Speed)
   )
 
@@ -164,66 +182,61 @@ cat("Low risk cases:", sum(train_processed$is_high_risk == 0), "\n")
 ```{r test-feature-engineering}
 cat("Engineering features for testing data...\n")
 
-# Self-join to link subject vehicle with preceding vehicle
-test_processed <- test_data %>%
-  # Rename columns for subject vehicle
+# Self-join to get current features
+test_features <- test_data %>%
   rename(
     Vehicle_ID_Subject = Vehicle_ID,
     v_Vel_Subject = v_Vel,
     v_Acc_Subject = v_Acc,
     v_Length_Subject = v_Length,
     Space_Hdwy_Subject = Space_Hdwy,
+    Lane_ID_Subject = Lane_ID,
     Preceeding_ID = Preceeding
   ) %>%
-  # Join with lead vehicle data
   inner_join(
     test_data %>%
-      select(
-        Vehicle_ID,
-        Frame_ID,
-        v_Vel,
-        v_Length
-      ) %>%
-      rename(
-        Preceeding_ID = Vehicle_ID,
-        v_Vel_Lead = v_Vel,
-        v_Length_Lead = v_Length
-      ),
+      select(Vehicle_ID, Frame_ID, v_Vel, v_Length) %>%
+      rename(Preceeding_ID = Vehicle_ID, v_Vel_Lead = v_Vel, v_Length_Lead = v_Length),
     by = c("Preceeding_ID", "Frame_ID")
   ) %>%
-  # Calculate derived features
   mutate(
-    # Relative Speed (positive = closing the gap)
     Relative_Speed = v_Vel_Subject - v_Vel_Lead,
-
-    # Actual Gap (bumper-to-bumper distance)
     Actual_Gap = Space_Hdwy_Subject - (v_Length_Subject / 2) - (v_Length_Lead / 2),
+    TTC_current = Actual_Gap / Relative_Speed
+  )
 
-    # Time-To-Collision
-    TTC = Actual_Gap / Relative_Speed,
+# Get future TTC for labels
+test_future <- test_features %>%
+  select(Vehicle_ID_Subject, Frame_ID, Preceeding_ID, TTC_current) %>%
+  mutate(Frame_ID_past = Frame_ID - DELTA_T_FRAMES) %>%
+  rename(TTC_future = TTC_current)
 
-    # High Risk Target Variable
+test_processed <- test_features %>%
+  left_join(
+    test_future %>% select(Vehicle_ID_Subject, Frame_ID_past, TTC_future),
+    by = c("Vehicle_ID_Subject" = "Vehicle_ID_Subject", "Frame_ID" = "Frame_ID_past")
+  ) %>%
+  mutate(
     is_high_risk = if_else(
-      TTC > 0 & TTC < 4.0,
+      !is.na(TTC_future) & TTC_future > 0 & TTC_future < TTC_THRESHOLD,
       1,
       0
     )
   ) %>%
-  # Select final columns
   select(
     v_Vel = v_Vel_Subject,
     v_Acc = v_Acc_Subject,
-    Actual_Gap,
+    Space_Hdwy = Space_Hdwy_Subject,
     Relative_Speed,
-    TTC,
+    Lane_ID = Lane_ID_Subject,
+    TTC_current,
     is_high_risk
   ) %>%
-  # Remove invalid rows
   filter(
-    !is.na(TTC),
-    !is.infinite(TTC),
+    !is.na(TTC_current),
+    !is.infinite(TTC_current),
     !is.na(is_high_risk),
-    !is.na(Actual_Gap),
+    !is.na(Space_Hdwy),
     !is.na(Relative_Speed)
   )
 
@@ -237,159 +250,178 @@ cat("Low risk cases:", sum(test_processed$is_high_risk == 0), "\n")
 ```{r feature-summary}
 # Training data summary
 cat("\n=== TRAINING DATA SUMMARY ===\n")
-summary(train_processed %>% select(v_Vel, v_Acc, Actual_Gap, Relative_Speed))
+summary(train_processed %>% select(v_Vel, v_Acc, Space_Hdwy, Relative_Speed, TTC_current))
 
 # Testing data summary
 cat("\n=== TESTING DATA SUMMARY ===\n")
-summary(test_processed %>% select(v_Vel, v_Acc, Actual_Gap, Relative_Speed))
+summary(test_processed %>% select(v_Vel, v_Acc, Space_Hdwy, Relative_Speed, TTC_current))
 ```
 
 # 4. Modeling
 
-```{r model-training}
-cat("\nTraining logistic regression model...\n")
+## 4.1 Full Model (with TTC_current)
 
-# Train logistic regression model
-logistic_model <- glm(
-  is_high_risk ~ v_Vel + v_Acc + Actual_Gap + Relative_Speed,
+```{r model-training-full}
+cat("\nTraining logistic regression model (full features)...\n")
+
+# Model with all features including TTC_current
+model_full <- glm(
+  is_high_risk ~ v_Vel + v_Acc + Space_Hdwy + Relative_Speed + Lane_ID + TTC_current,
   data = train_processed,
   family = binomial(link = "logit")
 )
 
-# Display model summary
-cat("\n=== MODEL SUMMARY ===\n")
-summary(logistic_model)
+cat("\n=== FULL MODEL SUMMARY ===\n")
+summary(model_full)
+```
 
-# Display coefficients
-cat("\n=== MODEL COEFFICIENTS ===\n")
-print(coef(logistic_model))
+## 4.2 Reduced Model (without TTC_current)
+
+```{r model-training-reduced}
+cat("\nTraining logistic regression model (without TTC_current)...\n")
+
+# Model without TTC_current to check for leakage
+model_reduced <- glm(
+  is_high_risk ~ v_Vel + v_Acc + Space_Hdwy + Relative_Speed + Lane_ID,
+  data = train_processed,
+  family = binomial(link = "logit")
+)
+
+cat("\n=== REDUCED MODEL SUMMARY ===\n")
+summary(model_reduced)
 ```
 
 # 5. Evaluation
 
-## 5.1 Predictions on Test Data
+## 5.1 Full Model Evaluation
 
-```{r predictions}
-# Predict probabilities on test data
-test_probabilities <- predict(
-  logistic_model,
-  newdata = test_processed,
-  type = "response"
-)
+```{r eval-full}
+# Predictions from full model
+prob_full <- predict(model_full, newdata = test_processed, type = "response")
+pred_full <- if_else(prob_full > 0.5, 1, 0)
 
-# Convert probabilities to binary predictions (threshold = 0.5)
-test_predictions <- if_else(test_probabilities > 0.5, 1, 0)
-
-# Add predictions to test data
-test_processed <- test_processed %>%
-  mutate(
-    predicted_prob = test_probabilities,
-    predicted_class = test_predictions
-  )
-
-cat("Predictions completed for", nrow(test_processed), "test cases\n")
-```
-
-## 5.2 Confusion Matrix
-
-```{r confusion-matrix}
-cat("\n=== CONFUSION MATRIX ===\n")
-
-# Create confusion matrix
-cm <- confusionMatrix(
-  factor(test_predictions, levels = c(0, 1)),
+# Confusion matrix
+cm_full <- confusionMatrix(
+  factor(pred_full, levels = c(0, 1)),
   factor(test_processed$is_high_risk, levels = c(0, 1)),
   positive = "1"
 )
 
-print(cm)
+# ROC/AUC
+roc_full <- roc(test_processed$is_high_risk, prob_full, levels = c(0, 1), direction = "<")
+auc_full <- auc(roc_full)
 
-# Extract key metrics
-accuracy <- cm$overall["Accuracy"]
-sensitivity <- cm$byClass["Sensitivity"]
-specificity <- cm$byClass["Specificity"]
-precision <- cm$byClass["Precision"]
-
-cat("\n=== KEY METRICS ===\n")
-cat(sprintf("Accuracy: %.4f\n", accuracy))
-cat(sprintf("Sensitivity (Recall): %.4f\n", sensitivity))
-cat(sprintf("Specificity: %.4f\n", specificity))
-cat(sprintf("Precision: %.4f\n", precision))
+cat("\n=== FULL MODEL METRICS ===\n")
+cat(sprintf("Accuracy:  %.4f\n", cm_full$overall["Accuracy"]))
+cat(sprintf("Precision: %.4f\n", cm_full$byClass["Precision"]))
+cat(sprintf("Recall:    %.4f\n", cm_full$byClass["Sensitivity"]))
+cat(sprintf("AUC:       %.4f\n", auc_full))
 ```
 
-## 5.3 ROC Curve and AUC
+## 5.2 Reduced Model Evaluation
 
-```{r roc-curve, fig.width=8, fig.height=6}
-# Calculate ROC curve
-roc_obj <- roc(
-  test_processed$is_high_risk,
-  test_probabilities,
-  levels = c(0, 1),
-  direction = "<"
+```{r eval-reduced}
+# Predictions from reduced model
+prob_reduced <- predict(model_reduced, newdata = test_processed, type = "response")
+pred_reduced <- if_else(prob_reduced > 0.5, 1, 0)
+
+# Confusion matrix
+cm_reduced <- confusionMatrix(
+  factor(pred_reduced, levels = c(0, 1)),
+  factor(test_processed$is_high_risk, levels = c(0, 1)),
+  positive = "1"
 )
 
-# Calculate AUC
-auc_value <- auc(roc_obj)
+# ROC/AUC
+roc_reduced <- roc(test_processed$is_high_risk, prob_reduced, levels = c(0, 1), direction = "<")
+auc_reduced <- auc(roc_reduced)
 
-cat("\n=== ROC ANALYSIS ===\n")
-cat(sprintf("AUC (Area Under Curve): %.4f\n", auc_value))
-
-# Plot ROC Curve
-roc_data <- data.frame(
-  Sensitivity = roc_obj$sensitivities,
-  Specificity = roc_obj$specificities
-)
-
-ggplot(roc_data, aes(x = 1 - Specificity, y = Sensitivity)) +
-  geom_line(color = "blue", size = 1.2) +
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
-  labs(
-    title = "ROC Curve for Logistic Regression Model",
-    subtitle = sprintf("AUC = %.4f", auc_value),
-    x = "1 - Specificity (False Positive Rate)",
-    y = "Sensitivity (True Positive Rate)"
-  ) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
-    plot.subtitle = element_text(hjust = 0.5, size = 12)
-  ) +
-  coord_equal()
+cat("\n=== REDUCED MODEL METRICS ===\n")
+cat(sprintf("Accuracy:  %.4f\n", cm_reduced$overall["Accuracy"]))
+cat(sprintf("Precision: %.4f\n", cm_reduced$byClass["Precision"]))
+cat(sprintf("Recall:    %.4f\n", cm_reduced$byClass["Sensitivity"]))
+cat(sprintf("AUC:       %.4f\n", auc_reduced))
 ```
 
-## 5.4 Probability Distribution
+## 5.3 Model Comparison
 
-```{r probability-distribution, fig.width=10, fig.height=6}
-# Plot distribution of predicted probabilities by actual class
-ggplot(test_processed, aes(x = predicted_prob, fill = factor(is_high_risk))) +
-  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
+```{r model-comparison}
+cat("\n=== LEAKAGE CHECK: MODEL COMPARISON ===\n")
+cat("Full model includes TTC_current; Reduced model excludes it.\n")
+cat("Large performance gap suggests TTC_current contains label information.\n\n")
+
+comparison <- data.frame(
+  Model = c("Full (with TTC)", "Reduced (no TTC)"),
+  Accuracy = c(cm_full$overall["Accuracy"], cm_reduced$overall["Accuracy"]),
+  Precision = c(cm_full$byClass["Precision"], cm_reduced$byClass["Precision"]),
+  Recall = c(cm_full$byClass["Sensitivity"], cm_reduced$byClass["Sensitivity"]),
+  AUC = c(auc_full, auc_reduced)
+)
+print(comparison)
+
+cat("\n")
+if (auc_full - auc_reduced > 0.05) {
+  cat("⚠️  Significant performance drop without TTC_current.\n")
+  cat("TTC_current may still contain predictive leakage.\n")
+} else {
+  cat("✓ Performance similar between models. Leakage likely eliminated.\n")
+}
+```
+
+## 5.4 Class Distribution
+
+```{r class-distribution}
+cat("\n=== CLASS DISTRIBUTION ===\n")
+test_high_risk_pct <- mean(test_processed$is_high_risk) * 100
+cat(sprintf("High Risk: %.2f%%\n", test_high_risk_pct))
+cat(sprintf("Low Risk:  %.2f%%\n", 100 - test_high_risk_pct))
+
+baseline_acc <- max(test_high_risk_pct, 100 - test_high_risk_pct) / 100
+cat(sprintf("\nBaseline (majority class): %.4f\n", baseline_acc))
+cat(sprintf("Full model improvement:    %.4f\n", cm_full$overall["Accuracy"] - baseline_acc))
+cat(sprintf("Reduced model improvement: %.4f\n", cm_reduced$overall["Accuracy"] - baseline_acc))
+```
+
+## 5.5 ROC Curves
+
+```{r roc-curves, fig.width=10, fig.height=6}
+# Plot ROC for both models
+roc_data_full <- data.frame(
+  FPR = 1 - roc_full$specificities,
+  TPR = roc_full$sensitivities,
+  Model = "Full (with TTC)"
+)
+
+roc_data_reduced <- data.frame(
+  FPR = 1 - roc_reduced$specificities,
+  TPR = roc_reduced$sensitivities,
+  Model = "Reduced (no TTC)"
+)
+
+roc_combined <- rbind(roc_data_full, roc_data_reduced)
+
+ggplot(roc_combined, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line(size = 1.2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
   labs(
-    title = "Distribution of Predicted Probabilities",
-    x = "Predicted Probability of High Risk",
-    y = "Count",
-    fill = "Actual Class"
-  ) +
-  scale_fill_manual(
-    values = c("0" = "green", "1" = "red"),
-    labels = c("0" = "Low Risk", "1" = "High Risk")
+    title = "ROC Curves: Full vs Reduced Model",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
   ) +
   theme_minimal() +
-  theme(
-    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
-    legend.position = "top"
-  )
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
 ```
 
 # 6. Conclusion
 
 ```{r conclusion}
-cat("\n=== MODEL PERFORMANCE SUMMARY ===\n")
-cat(sprintf("Total Test Cases: %d\n", nrow(test_processed)))
-cat(sprintf("Accuracy: %.2f%%\n", accuracy * 100))
-cat(sprintf("AUC: %.4f\n", auc_value))
-cat(sprintf("Sensitivity: %.2f%%\n", sensitivity * 100))
-cat(sprintf("Specificity: %.2f%%\n", specificity * 100))
-cat("\nThe logistic regression model has been successfully trained and evaluated.\n")
-cat("The model uses vehicle velocity, acceleration, actual gap, and relative speed\n")
-cat("to predict high-risk driving scenarios based on Time-To-Collision (TTC < 4 seconds).\n")
+cat("\n=== SUMMARY ===\n")
+cat("Prediction task: Future high-risk events (TTC < 4 sec in 2 seconds)\n")
+cat("Label construction eliminates instantaneous TTC-based leakage.\n")
+cat(sprintf("\nTotal test cases: %d\n", nrow(test_processed)))
+cat(sprintf("\nReduced model (recommended):\n"))
+cat(sprintf("  Accuracy:  %.4f\n", cm_reduced$overall["Accuracy"]))
+cat(sprintf("  Precision: %.4f\n", cm_reduced$byClass["Precision"]))
+cat(sprintf("  Recall:    %.4f\n", cm_reduced$byClass["Sensitivity"]))
+cat(sprintf("  AUC:       %.4f\n", auc_reduced))
 ```
