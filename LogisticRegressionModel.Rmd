@@ -260,8 +260,8 @@ summary(test_processed %>% select(v_Vel, v_Acc, Space_Hdwy, Relative_Speed, TTC_
 
 # 4. Modeling
 
-```{r model-training-full}
-cat("\nTraining logistic regression model (full features)...\n")
+```{r model-training}
+cat("\nTraining logistic regression model...\n")
 
 # Model with all features including TTC_current
 model_full <- glm(
@@ -270,16 +270,16 @@ model_full <- glm(
   family = binomial(link = "logit")
 )
 
-cat("\n=== FULL MODEL SUMMARY ===\n")
+cat("\n=== MODEL SUMMARY ===\n")
 summary(model_full)
 ```
 
 # 5. Evaluation
 
-## 5.1 Full Model Evaluation
+## 5.1 Model Evaluation
 
-```{r eval-full}
-# Predictions from full model
+```{r eval-model}
+# Predictions
 prob_full <- predict(model_full, newdata = test_processed, type = "response")
 pred_full <- if_else(prob_full > 0.5, 1, 0)
 
@@ -294,39 +294,14 @@ cm_full <- confusionMatrix(
 roc_full <- roc(test_processed$is_high_risk, prob_full, levels = c(0, 1), direction = "<")
 auc_full <- auc(roc_full)
 
-cat("\n=== FULL MODEL METRICS ===\n")
+cat("\n=== MODEL METRICS ===\n")
 cat(sprintf("Accuracy:  %.4f\n", cm_full$overall["Accuracy"]))
 cat(sprintf("Precision: %.4f\n", cm_full$byClass["Precision"]))
 cat(sprintf("Recall:    %.4f\n", cm_full$byClass["Sensitivity"]))
 cat(sprintf("AUC:       %.4f\n", auc_full))
 ```
 
-## 5.3 Model Comparison
-
-```{r model-comparison}
-cat("\n=== LEAKAGE CHECK: MODEL COMPARISON ===\n")
-cat("Full model includes TTC_current; Reduced model excludes it.\n")
-cat("Large performance gap suggests TTC_current contains label information.\n\n")
-
-comparison <- data.frame(
-  Model = c("Full (with TTC)", "Reduced (no TTC)"),
-  Accuracy = c(cm_full$overall["Accuracy"], cm_reduced$overall["Accuracy"]),
-  Precision = c(cm_full$byClass["Precision"], cm_reduced$byClass["Precision"]),
-  Recall = c(cm_full$byClass["Sensitivity"], cm_reduced$byClass["Sensitivity"]),
-  AUC = c(auc_full, auc_reduced)
-)
-print(comparison)
-
-cat("\n")
-if (auc_full - auc_reduced > 0.05) {
-  cat("⚠️  Significant performance drop without TTC_current.\n")
-  cat("TTC_current may still contain predictive leakage.\n")
-} else {
-  cat("✓ Performance similar between models. Leakage likely eliminated.\n")
-}
-```
-
-## 5.4 Class Distribution
+## 5.2 Class Distribution
 
 ```{r class-distribution}
 cat("\n=== CLASS DISTRIBUTION ===\n")
@@ -336,33 +311,23 @@ cat(sprintf("Low Risk:  %.2f%%\n", 100 - test_high_risk_pct))
 
 baseline_acc <- max(test_high_risk_pct, 100 - test_high_risk_pct) / 100
 cat(sprintf("\nBaseline (majority class): %.4f\n", baseline_acc))
-cat(sprintf("Full model improvement:    %.4f\n", cm_full$overall["Accuracy"] - baseline_acc))
-cat(sprintf("Reduced model improvement: %.4f\n", cm_reduced$overall["Accuracy"] - baseline_acc))
+cat(sprintf("Model improvement:         %.4f\n", cm_full$overall["Accuracy"] - baseline_acc))
 ```
 
-## 5.5 ROC Curves
+## 5.3 ROC Curve
 
-```{r roc-curves, fig.width=10, fig.height=6}
-# Plot ROC for both models
-roc_data_full <- data.frame(
+```{r roc-curve, fig.width=8, fig.height=6}
+# Plot ROC curve
+roc_data <- data.frame(
   FPR = 1 - roc_full$specificities,
-  TPR = roc_full$sensitivities,
-  Model = "Full (with TTC)"
+  TPR = roc_full$sensitivities
 )
 
-roc_data_reduced <- data.frame(
-  FPR = 1 - roc_reduced$specificities,
-  TPR = roc_reduced$sensitivities,
-  Model = "Reduced (no TTC)"
-)
-
-roc_combined <- rbind(roc_data_full, roc_data_reduced)
-
-ggplot(roc_combined, aes(x = FPR, y = TPR, color = Model)) +
-  geom_line(size = 1.2) +
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", size = 1.2) +
   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
   labs(
-    title = "ROC Curves: Full vs Reduced Model",
+    title = sprintf("ROC Curve (AUC = %.4f)", auc_full),
     x = "False Positive Rate",
     y = "True Positive Rate"
   ) +
@@ -616,9 +581,9 @@ cat("2. Rolling features impact: See Section 7\n")
 cat("3. Vehicle class differences: See Section 8\n\n")
 
 cat(sprintf("Total test cases: %d\n", nrow(test_processed)))
-cat(sprintf("\nReduced model (Δt=2sec, no TTC_current):\n"))
-cat(sprintf("  Accuracy:  %.4f\n", cm_reduced$overall["Accuracy"]))
-cat(sprintf("  Precision: %.4f\n", cm_reduced$byClass["Precision"]))
-cat(sprintf("  Recall:    %.4f\n", cm_reduced$byClass["Sensitivity"]))
-cat(sprintf("  AUC:       %.4f\n", auc_reduced))
+cat(sprintf("\nModel Performance (Δt=2sec):\n"))
+cat(sprintf("  Accuracy:  %.4f\n", cm_full$overall["Accuracy"]))
+cat(sprintf("  Precision: %.4f\n", cm_full$byClass["Precision"]))
+cat(sprintf("  Recall:    %.4f\n", cm_full$byClass["Sensitivity"]))
+cat(sprintf("  AUC:       %.4f\n", auc_full))
 ```
