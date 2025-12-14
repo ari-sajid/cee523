@@ -26,6 +26,7 @@ library(readr)
 library(caret)
 library(pROC)
 library(ggplot2)
+library(zoo)
 
 # Set seed for reproducibility
 set.seed(123)
@@ -66,7 +67,8 @@ train_data <- read_csv(
     Space_Hdwy = col_double(),
     Preceeding = col_double(),
     v_Length = col_double(),
-    Lane_ID = col_double()
+    Lane_ID = col_double(),
+    v_Class = col_double()
   )
 )
 
@@ -88,7 +90,8 @@ test_data <- read_csv(
     Space_Hdwy = col_double(),
     Preceeding = col_double(),
     v_Length = col_double(),
-    Lane_ID = col_double()
+    Lane_ID = col_double(),
+    v_Class = col_double()
   )
 )
 
@@ -120,6 +123,7 @@ train_features <- train_data %>%
     v_Length_Subject = v_Length,
     Space_Hdwy_Subject = Space_Hdwy,
     Lane_ID_Subject = Lane_ID,
+    v_Class_Subject = v_Class,
     Preceeding_ID = Preceeding
   ) %>%
   inner_join(
@@ -156,11 +160,14 @@ train_processed <- train_features %>%
   ) %>%
   # Features at time t
   select(
+    Vehicle_ID = Vehicle_ID_Subject,
+    Frame_ID,
     v_Vel = v_Vel_Subject,
     v_Acc = v_Acc_Subject,
     Space_Hdwy = Space_Hdwy_Subject,
     Relative_Speed,
     Lane_ID = Lane_ID_Subject,
+    v_Class = v_Class_Subject,
     TTC_current,
     is_high_risk
   ) %>%
@@ -191,6 +198,7 @@ test_features <- test_data %>%
     v_Length_Subject = v_Length,
     Space_Hdwy_Subject = Space_Hdwy,
     Lane_ID_Subject = Lane_ID,
+    v_Class_Subject = v_Class,
     Preceeding_ID = Preceeding
   ) %>%
   inner_join(
@@ -224,11 +232,14 @@ test_processed <- test_features %>%
     )
   ) %>%
   select(
+    Vehicle_ID = Vehicle_ID_Subject,
+    Frame_ID,
     v_Vel = v_Vel_Subject,
     v_Acc = v_Acc_Subject,
     Space_Hdwy = Space_Hdwy_Subject,
     Relative_Speed,
     Lane_ID = Lane_ID_Subject,
+    v_Class = v_Class_Subject,
     TTC_current,
     is_high_risk
   ) %>%
@@ -412,14 +423,253 @@ ggplot(roc_combined, aes(x = FPR, y = TPR, color = Model)) +
   theme(plot.title = element_text(hjust = 0.5, face = "bold"))
 ```
 
-# 6. Conclusion
+# 6. Prediction Horizon Sensitivity
+
+```{r horizon-sensitivity}
+cat("\n=== PREDICTION HORIZON SENSITIVITY ===\n")
+cat("Testing Δt = 1, 2, 3 seconds\n\n")
+
+# Horizons to test (in frames: 10 Hz data)
+horizons <- c(10, 20, 30)  # 1, 2, 3 seconds
+horizon_results <- list()
+
+for (delta_t in horizons) {
+  # Training labels
+  train_future_h <- train_features %>%
+    select(Vehicle_ID_Subject, Frame_ID, TTC_current) %>%
+    mutate(Frame_ID_past = Frame_ID - delta_t) %>%
+    rename(TTC_future = TTC_current)
+
+  train_h <- train_features %>%
+    left_join(
+      train_future_h %>% select(Vehicle_ID_Subject, Frame_ID_past, TTC_future),
+      by = c("Vehicle_ID_Subject", "Frame_ID" = "Frame_ID_past")
+    ) %>%
+    mutate(
+      is_high_risk = if_else(!is.na(TTC_future) & TTC_future > 0 & TTC_future < TTC_THRESHOLD, 1, 0)
+    ) %>%
+    select(v_Vel = v_Vel_Subject, v_Acc = v_Acc_Subject, Space_Hdwy = Space_Hdwy_Subject,
+           Relative_Speed, Lane_ID = Lane_ID_Subject, is_high_risk) %>%
+    filter(!is.na(is_high_risk))
+
+  # Testing labels
+  test_future_h <- test_features %>%
+    select(Vehicle_ID_Subject, Frame_ID, TTC_current) %>%
+    mutate(Frame_ID_past = Frame_ID - delta_t) %>%
+    rename(TTC_future = TTC_current)
+
+  test_h <- test_features %>%
+    left_join(
+      test_future_h %>% select(Vehicle_ID_Subject, Frame_ID_past, TTC_future),
+      by = c("Vehicle_ID_Subject", "Frame_ID" = "Frame_ID_past")
+    ) %>%
+    mutate(
+      is_high_risk = if_else(!is.na(TTC_future) & TTC_future > 0 & TTC_future < TTC_THRESHOLD, 1, 0)
+    ) %>%
+    select(v_Vel = v_Vel_Subject, v_Acc = v_Acc_Subject, Space_Hdwy = Space_Hdwy_Subject,
+           Relative_Speed, Lane_ID = Lane_ID_Subject, is_high_risk) %>%
+    filter(!is.na(is_high_risk))
+
+  # Train model
+  model_h <- glm(is_high_risk ~ v_Vel + v_Acc + Space_Hdwy + Relative_Speed + Lane_ID,
+                 data = train_h, family = binomial(link = "logit"))
+
+  # Evaluate
+  prob_h <- predict(model_h, newdata = test_h, type = "response")
+  pred_h <- if_else(prob_h > 0.5, 1, 0)
+
+  cm_h <- confusionMatrix(factor(pred_h, levels = c(0, 1)),
+                          factor(test_h$is_high_risk, levels = c(0, 1)), positive = "1")
+
+  roc_h <- roc(test_h$is_high_risk, prob_h, levels = c(0, 1), direction = "<")
+  auc_h <- auc(roc_h)
+
+  # Store results
+  horizon_results[[as.character(delta_t)]] <- data.frame(
+    Delta_t_sec = delta_t / 10,
+    Accuracy = cm_h$overall["Accuracy"],
+    Precision = cm_h$byClass["Precision"],
+    Recall = cm_h$byClass["Sensitivity"],
+    AUC = auc_h
+  )
+}
+
+# Combine and display
+horizon_comparison <- do.call(rbind, horizon_results)
+rownames(horizon_comparison) <- NULL
+print(horizon_comparison)
+```
+
+# 7. Temporal Aggregation Features
+
+## 7.1 Add Rolling Features
+
+```{r rolling-features}
+cat("\n=== TEMPORAL AGGREGATION FEATURES ===\n")
+cat("Computing rolling statistics (1 second = 10 frames window)\n\n")
+
+ROLLING_WINDOW <- 10
+
+# Add rolling features to training data
+train_rolling <- train_processed %>%
+  arrange(Vehicle_ID, Frame_ID) %>%
+  group_by(Vehicle_ID) %>%
+  mutate(
+    v_Vel_roll = zoo::rollmean(v_Vel, k = ROLLING_WINDOW, fill = NA, align = "right"),
+    v_Acc_roll = zoo::rollmean(v_Acc, k = ROLLING_WINDOW, fill = NA, align = "right"),
+    Space_Hdwy_roll = zoo::rollmean(Space_Hdwy, k = ROLLING_WINDOW, fill = NA, align = "right")
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(v_Vel_roll), !is.na(v_Acc_roll), !is.na(Space_Hdwy_roll))
+
+# Add rolling features to testing data
+test_rolling <- test_processed %>%
+  arrange(Vehicle_ID, Frame_ID) %>%
+  group_by(Vehicle_ID) %>%
+  mutate(
+    v_Vel_roll = zoo::rollmean(v_Vel, k = ROLLING_WINDOW, fill = NA, align = "right"),
+    v_Acc_roll = zoo::rollmean(v_Acc, k = ROLLING_WINDOW, fill = NA, align = "right"),
+    Space_Hdwy_roll = zoo::rollmean(Space_Hdwy, k = ROLLING_WINDOW, fill = NA, align = "right")
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(v_Vel_roll), !is.na(v_Acc_roll), !is.na(Space_Hdwy_roll))
+
+cat("Training data with rolling features:", nrow(train_rolling), "rows\n")
+cat("Testing data with rolling features:", nrow(test_rolling), "rows\n")
+```
+
+## 7.2 Baseline vs Enhanced Model
+
+```{r rolling-comparison}
+# Baseline: instantaneous features only
+model_baseline <- glm(
+  is_high_risk ~ v_Vel + v_Acc + Space_Hdwy + Relative_Speed + Lane_ID,
+  data = train_rolling, family = binomial(link = "logit")
+)
+
+# Enhanced: with rolling features
+model_enhanced <- glm(
+  is_high_risk ~ v_Vel + v_Acc + Space_Hdwy + Relative_Speed + Lane_ID +
+    v_Vel_roll + v_Acc_roll + Space_Hdwy_roll,
+  data = train_rolling, family = binomial(link = "logit")
+)
+
+# Evaluate baseline
+prob_baseline <- predict(model_baseline, newdata = test_rolling, type = "response")
+pred_baseline <- if_else(prob_baseline > 0.5, 1, 0)
+cm_baseline <- confusionMatrix(factor(pred_baseline, levels = c(0, 1)),
+                               factor(test_rolling$is_high_risk, levels = c(0, 1)), positive = "1")
+roc_baseline <- roc(test_rolling$is_high_risk, prob_baseline, levels = c(0, 1), direction = "<")
+auc_baseline <- auc(roc_baseline)
+
+# Evaluate enhanced
+prob_enhanced <- predict(model_enhanced, newdata = test_rolling, type = "response")
+pred_enhanced <- if_else(prob_enhanced > 0.5, 1, 0)
+cm_enhanced <- confusionMatrix(factor(pred_enhanced, levels = c(0, 1)),
+                               factor(test_rolling$is_high_risk, levels = c(0, 1)), positive = "1")
+roc_enhanced <- roc(test_rolling$is_high_risk, prob_enhanced, levels = c(0, 1), direction = "<")
+auc_enhanced <- auc(roc_enhanced)
+
+# Comparison table
+rolling_comparison <- data.frame(
+  Model = c("Baseline (instantaneous)", "Enhanced (+ rolling features)"),
+  Accuracy = c(cm_baseline$overall["Accuracy"], cm_enhanced$overall["Accuracy"]),
+  Precision = c(cm_baseline$byClass["Precision"], cm_enhanced$byClass["Precision"]),
+  Recall = c(cm_baseline$byClass["Sensitivity"], cm_enhanced$byClass["Sensitivity"]),
+  AUC = c(auc_baseline, auc_enhanced)
+)
+
+cat("\n=== BASELINE VS ENHANCED MODEL ===\n")
+print(rolling_comparison)
+```
+
+# 8. Vehicle Class Segmentation
+
+```{r vehicle-class-analysis}
+cat("\n=== VEHICLE CLASS SEGMENTATION ===\n")
+cat("Analyzing performance by vehicle class\n\n")
+
+# Use best performing model (enhanced with rolling features)
+test_rolling_with_pred <- test_rolling %>%
+  mutate(
+    predicted = pred_enhanced,
+    actual = is_high_risk
+  )
+
+# Get unique vehicle classes
+vehicle_classes <- sort(unique(test_rolling_with_pred$v_Class))
+
+class_results <- list()
+
+for (vc in vehicle_classes) {
+  subset_data <- test_rolling_with_pred %>% filter(v_Class == vc)
+
+  if (nrow(subset_data) < 10) next  # Skip if too few samples
+
+  # Confusion matrix components
+  tp <- sum(subset_data$predicted == 1 & subset_data$actual == 1)
+  fp <- sum(subset_data$predicted == 1 & subset_data$actual == 0)
+  tn <- sum(subset_data$predicted == 0 & subset_data$actual == 0)
+  fn <- sum(subset_data$predicted == 0 & subset_data$actual == 1)
+
+  # Metrics
+  fpr <- if ((fp + tn) > 0) fp / (fp + tn) else NA
+  fnr <- if ((fn + tp) > 0) fn / (fn + tp) else NA
+  precision <- if ((tp + fp) > 0) tp / (tp + fp) else NA
+  recall <- if ((tp + fn) > 0) tp / (tp + fn) else NA
+
+  class_results[[as.character(vc)]] <- data.frame(
+    v_Class = vc,
+    n_samples = nrow(subset_data),
+    TP = tp,
+    FP = fp,
+    TN = tn,
+    FN = fn,
+    FPR = fpr,
+    FNR = fnr,
+    Precision = precision,
+    Recall = recall
+  )
+}
+
+# Combine results
+class_comparison <- do.call(rbind, class_results)
+rownames(class_comparison) <- NULL
+
+cat("\n=== CONFUSION MATRIX BY VEHICLE CLASS ===\n")
+print(class_comparison %>% select(v_Class, n_samples, TP, FP, TN, FN))
+
+cat("\n=== ERROR RATES BY VEHICLE CLASS ===\n")
+print(class_comparison %>% select(v_Class, FPR, FNR, Precision, Recall))
+
+cat("\n=== INTERPRETATION ===\n")
+high_fpr_classes <- class_comparison %>% filter(FPR > median(FPR, na.rm = TRUE)) %>% pull(v_Class)
+high_fnr_classes <- class_comparison %>% filter(FNR > median(FNR, na.rm = TRUE)) %>% pull(v_Class)
+
+if (length(high_fpr_classes) > 0) {
+  cat(sprintf("Classes with high FPR (over-predicted as high-risk): %s\n",
+              paste(high_fpr_classes, collapse = ", ")))
+}
+if (length(high_fnr_classes) > 0) {
+  cat(sprintf("Classes with high FNR (under-predicted as high-risk): %s\n",
+              paste(high_fnr_classes, collapse = ", ")))
+}
+```
+
+# 9. Conclusion
 
 ```{r conclusion}
 cat("\n=== SUMMARY ===\n")
-cat("Prediction task: Future high-risk events (TTC < 4 sec in 2 seconds)\n")
-cat("Label construction eliminates instantaneous TTC-based leakage.\n")
-cat(sprintf("\nTotal test cases: %d\n", nrow(test_processed)))
-cat(sprintf("\nReduced model (recommended):\n"))
+cat("Prediction task: Future high-risk events (TTC < 4 sec in future)\n")
+cat("Label construction eliminates instantaneous TTC-based leakage.\n\n")
+
+cat("Key Findings:\n")
+cat("1. Prediction horizon sensitivity: See Section 6\n")
+cat("2. Rolling features impact: See Section 7\n")
+cat("3. Vehicle class differences: See Section 8\n\n")
+
+cat(sprintf("Total test cases: %d\n", nrow(test_processed)))
+cat(sprintf("\nReduced model (Δt=2sec, no TTC_current):\n"))
 cat(sprintf("  Accuracy:  %.4f\n", cm_reduced$overall["Accuracy"]))
 cat(sprintf("  Precision: %.4f\n", cm_reduced$byClass["Precision"]))
 cat(sprintf("  Recall:    %.4f\n", cm_reduced$byClass["Sensitivity"]))
