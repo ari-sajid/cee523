@@ -1,10 +1,395 @@
 ---
-title: "Final Project: Logistic Regression Model"
+title: "Final Project: Logistic Regression Model for Vehicle Risk Assessment"
 author: "Ariyan Sajid"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Project Overview
+
+This project develops a logistic regression model to classify high-risk driving scenarios based on NGSIM trajectory data. The model uses Time-To-Collision (TTC) as the primary risk indicator, with TTC values between 0 and 4 seconds classified as high-risk situations.
+
+# 1. Setup & Libraries
+
+```{r libraries}
+# Load required libraries
+library(dplyr)
+library(readr)
+library(caret)
+library(pROC)
+library(ggplot2)
+
+# Set seed for reproducibility
+set.seed(123)
+```
+
+# 2. Data Loading
+
+```{r data-loading}
+# Unzip the data if not already extracted
+if (!dir.exists("TrajectoryData")) {
+  unzip("TrajectoryData.zip")
+}
+
+# Load Training Data with only required columns
+cat("Loading training data...\n")
+train_data <- read_csv(
+  "TrajectoryData/0750am-0805am.csv",
+  col_types = cols_only(
+    Vehicle_ID = col_double(),
+    Frame_ID = col_double(),
+    v_Vel = col_double(),
+    v_Acc = col_double(),
+    Space_Headway = col_double(),
+    Preceding = col_double(),
+    v_length = col_double(),
+    Lane_ID = col_double()
+  )
+)
+
+# Filter out rows with no preceding vehicle
+train_data <- train_data %>%
+  filter(Preceding != 0)
+
+cat("Training data loaded:", nrow(train_data), "rows\n")
+
+# Load Testing Data with only required columns
+cat("Loading testing data...\n")
+test_data <- read_csv(
+  "TrajectoryData/0820am-0835am.csv",
+  col_types = cols_only(
+    Vehicle_ID = col_double(),
+    Frame_ID = col_double(),
+    v_Vel = col_double(),
+    v_Acc = col_double(),
+    Space_Headway = col_double(),
+    Preceding = col_double(),
+    v_length = col_double(),
+    Lane_ID = col_double()
+  )
+)
+
+# Filter out rows with no preceding vehicle
+test_data <- test_data %>%
+  filter(Preceding != 0)
+
+cat("Testing data loaded:", nrow(test_data), "rows\n")
+```
+
+# 3. Feature Engineering
+
+## 3.1 Training Data Feature Engineering
+
+```{r train-feature-engineering}
+cat("Engineering features for training data...\n")
+
+# Self-join to link subject vehicle with preceding vehicle
+train_processed <- train_data %>%
+  # Rename columns for subject vehicle
+  rename(
+    Vehicle_ID_Subject = Vehicle_ID,
+    v_Vel_Subject = v_Vel,
+    v_Acc_Subject = v_Acc,
+    v_length_Subject = v_length,
+    Space_Headway_Subject = Space_Headway,
+    Preceding_ID = Preceding
+  ) %>%
+  # Join with lead vehicle data
+  inner_join(
+    train_data %>%
+      select(
+        Vehicle_ID,
+        Frame_ID,
+        v_Vel,
+        v_length
+      ) %>%
+      rename(
+        Preceding_ID = Vehicle_ID,
+        v_Vel_Lead = v_Vel,
+        v_length_Lead = v_length
+      ),
+    by = c("Preceding_ID", "Frame_ID")
+  ) %>%
+  # Calculate derived features
+  mutate(
+    # Relative Speed (positive = closing the gap)
+    Relative_Speed = v_Vel_Subject - v_Vel_Lead,
+
+    # Actual Gap (bumper-to-bumper distance)
+    Actual_Gap = Space_Headway_Subject - (v_length_Subject / 2) - (v_length_Lead / 2),
+
+    # Time-To-Collision
+    TTC = Actual_Gap / Relative_Speed,
+
+    # High Risk Target Variable
+    is_high_risk = if_else(
+      TTC > 0 & TTC < 4.0,
+      1,
+      0
+    )
+  ) %>%
+  # Select final columns
+  select(
+    v_Vel = v_Vel_Subject,
+    v_Acc = v_Acc_Subject,
+    Actual_Gap,
+    Relative_Speed,
+    TTC,
+    is_high_risk
+  ) %>%
+  # Remove invalid rows
+  filter(
+    !is.na(TTC),
+    !is.infinite(TTC),
+    !is.na(is_high_risk),
+    !is.na(Actual_Gap),
+    !is.na(Relative_Speed)
+  )
+
+cat("Training data after feature engineering:", nrow(train_processed), "rows\n")
+cat("High risk cases:", sum(train_processed$is_high_risk), "\n")
+cat("Low risk cases:", sum(train_processed$is_high_risk == 0), "\n")
+```
+
+## 3.2 Testing Data Feature Engineering
+
+```{r test-feature-engineering}
+cat("Engineering features for testing data...\n")
+
+# Self-join to link subject vehicle with preceding vehicle
+test_processed <- test_data %>%
+  # Rename columns for subject vehicle
+  rename(
+    Vehicle_ID_Subject = Vehicle_ID,
+    v_Vel_Subject = v_Vel,
+    v_Acc_Subject = v_Acc,
+    v_length_Subject = v_length,
+    Space_Headway_Subject = Space_Headway,
+    Preceding_ID = Preceding
+  ) %>%
+  # Join with lead vehicle data
+  inner_join(
+    test_data %>%
+      select(
+        Vehicle_ID,
+        Frame_ID,
+        v_Vel,
+        v_length
+      ) %>%
+      rename(
+        Preceding_ID = Vehicle_ID,
+        v_Vel_Lead = v_Vel,
+        v_length_Lead = v_length
+      ),
+    by = c("Preceding_ID", "Frame_ID")
+  ) %>%
+  # Calculate derived features
+  mutate(
+    # Relative Speed (positive = closing the gap)
+    Relative_Speed = v_Vel_Subject - v_Vel_Lead,
+
+    # Actual Gap (bumper-to-bumper distance)
+    Actual_Gap = Space_Headway_Subject - (v_length_Subject / 2) - (v_length_Lead / 2),
+
+    # Time-To-Collision
+    TTC = Actual_Gap / Relative_Speed,
+
+    # High Risk Target Variable
+    is_high_risk = if_else(
+      TTC > 0 & TTC < 4.0,
+      1,
+      0
+    )
+  ) %>%
+  # Select final columns
+  select(
+    v_Vel = v_Vel_Subject,
+    v_Acc = v_Acc_Subject,
+    Actual_Gap,
+    Relative_Speed,
+    TTC,
+    is_high_risk
+  ) %>%
+  # Remove invalid rows
+  filter(
+    !is.na(TTC),
+    !is.infinite(TTC),
+    !is.na(is_high_risk),
+    !is.na(Actual_Gap),
+    !is.na(Relative_Speed)
+  )
+
+cat("Testing data after feature engineering:", nrow(test_processed), "rows\n")
+cat("High risk cases:", sum(test_processed$is_high_risk), "\n")
+cat("Low risk cases:", sum(test_processed$is_high_risk == 0), "\n")
+```
+
+## 3.3 Feature Distribution Summary
+
+```{r feature-summary}
+# Training data summary
+cat("\n=== TRAINING DATA SUMMARY ===\n")
+summary(train_processed %>% select(v_Vel, v_Acc, Actual_Gap, Relative_Speed))
+
+# Testing data summary
+cat("\n=== TESTING DATA SUMMARY ===\n")
+summary(test_processed %>% select(v_Vel, v_Acc, Actual_Gap, Relative_Speed))
+```
+
+# 4. Modeling
+
+```{r model-training}
+cat("\nTraining logistic regression model...\n")
+
+# Train logistic regression model
+logistic_model <- glm(
+  is_high_risk ~ v_Vel + v_Acc + Actual_Gap + Relative_Speed,
+  data = train_processed,
+  family = binomial(link = "logit")
+)
+
+# Display model summary
+cat("\n=== MODEL SUMMARY ===\n")
+summary(logistic_model)
+
+# Display coefficients
+cat("\n=== MODEL COEFFICIENTS ===\n")
+print(coef(logistic_model))
+```
+
+# 5. Evaluation
+
+## 5.1 Predictions on Test Data
+
+```{r predictions}
+# Predict probabilities on test data
+test_probabilities <- predict(
+  logistic_model,
+  newdata = test_processed,
+  type = "response"
+)
+
+# Convert probabilities to binary predictions (threshold = 0.5)
+test_predictions <- if_else(test_probabilities > 0.5, 1, 0)
+
+# Add predictions to test data
+test_processed <- test_processed %>%
+  mutate(
+    predicted_prob = test_probabilities,
+    predicted_class = test_predictions
+  )
+
+cat("Predictions completed for", nrow(test_processed), "test cases\n")
+```
+
+## 5.2 Confusion Matrix
+
+```{r confusion-matrix}
+cat("\n=== CONFUSION MATRIX ===\n")
+
+# Create confusion matrix
+cm <- confusionMatrix(
+  factor(test_predictions, levels = c(0, 1)),
+  factor(test_processed$is_high_risk, levels = c(0, 1)),
+  positive = "1"
+)
+
+print(cm)
+
+# Extract key metrics
+accuracy <- cm$overall["Accuracy"]
+sensitivity <- cm$byClass["Sensitivity"]
+specificity <- cm$byClass["Specificity"]
+precision <- cm$byClass["Precision"]
+
+cat("\n=== KEY METRICS ===\n")
+cat(sprintf("Accuracy: %.4f\n", accuracy))
+cat(sprintf("Sensitivity (Recall): %.4f\n", sensitivity))
+cat(sprintf("Specificity: %.4f\n", specificity))
+cat(sprintf("Precision: %.4f\n", precision))
+```
+
+## 5.3 ROC Curve and AUC
+
+```{r roc-curve, fig.width=8, fig.height=6}
+# Calculate ROC curve
+roc_obj <- roc(
+  test_processed$is_high_risk,
+  test_probabilities,
+  levels = c(0, 1),
+  direction = "<"
+)
+
+# Calculate AUC
+auc_value <- auc(roc_obj)
+
+cat("\n=== ROC ANALYSIS ===\n")
+cat(sprintf("AUC (Area Under Curve): %.4f\n", auc_value))
+
+# Plot ROC Curve
+roc_data <- data.frame(
+  Sensitivity = roc_obj$sensitivities,
+  Specificity = roc_obj$specificities
+)
+
+ggplot(roc_data, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_line(color = "blue", size = 1.2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(
+    title = "ROC Curve for Logistic Regression Model",
+    subtitle = sprintf("AUC = %.4f", auc_value),
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12)
+  ) +
+  coord_equal()
+```
+
+## 5.4 Probability Distribution
+
+```{r probability-distribution, fig.width=10, fig.height=6}
+# Plot distribution of predicted probabilities by actual class
+ggplot(test_processed, aes(x = predicted_prob, fill = factor(is_high_risk))) +
+  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
+  labs(
+    title = "Distribution of Predicted Probabilities",
+    x = "Predicted Probability of High Risk",
+    y = "Count",
+    fill = "Actual Class"
+  ) +
+  scale_fill_manual(
+    values = c("0" = "green", "1" = "red"),
+    labels = c("0" = "Low Risk", "1" = "High Risk")
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+```
+
+# 6. Conclusion
+
+```{r conclusion}
+cat("\n=== MODEL PERFORMANCE SUMMARY ===\n")
+cat(sprintf("Total Test Cases: %d\n", nrow(test_processed)))
+cat(sprintf("Accuracy: %.2f%%\n", accuracy * 100))
+cat(sprintf("AUC: %.4f\n", auc_value))
+cat(sprintf("Sensitivity: %.2f%%\n", sensitivity * 100))
+cat(sprintf("Specificity: %.2f%%\n", specificity * 100))
+cat("\nThe logistic regression model has been successfully trained and evaluated.\n")
+cat("The model uses vehicle velocity, acceleration, actual gap, and relative speed\n")
+cat("to predict high-risk driving scenarios based on Time-To-Collision (TTC < 4 seconds).\n")
 ```
