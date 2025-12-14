@@ -1,5 +1,5 @@
 ---
-title: "Final Project: Logistic Regression Model for Vehicle Risk Assessment"
+title: "Logistic Regression Model for Vehicle Risk Assessment"
 author: "Ariyan Sajid"
 date: "`r Sys.Date()`"
 output:
@@ -20,7 +20,6 @@ This project develops a logistic regression model to classify high-risk driving 
 # 1. Setup & Libraries
 
 ```{r libraries}
-# Load required libraries
 library(dplyr)
 library(readr)
 library(caret)
@@ -40,23 +39,15 @@ if (!file.exists("TrajectoryData.zip")) {
   stop("TrajectoryData.zip not found in the project directory!")
 }
 
-# Unzip the data if not already extracted
+# Unzip data if needed
 if (!dir.exists("TrajectoryData")) {
-  cat("Extracting TrajectoryData.zip...\n")
+  cat("Extracting TrajectoryData.zip\n")
   unzip("TrajectoryData.zip", exdir = ".")
-  cat("Extraction complete!\n")
+  cat("Extraction complete\n")
 }
 
-# Verify data files exist
-if (!file.exists("TrajectoryData/0750am-0805am.csv")) {
-  stop("Training data file not found after extraction!")
-}
-if (!file.exists("TrajectoryData/0820am-0835am.csv")) {
-  stop("Testing data file not found after extraction!")
-}
-
-# Load Training Data with only required columns
-cat("Loading training data...\n")
+# Load Training Data, remove unneeded columns
+cat("Loading training data\n")
 train_data <- read_csv(
   "TrajectoryData/0750am-0805am.csv",
   col_types = cols_only(
@@ -72,14 +63,14 @@ train_data <- read_csv(
   )
 )
 
-# Filter out rows with no preceding vehicle
+# Remove vehicles with no vehicle ahead
 train_data <- train_data %>%
   filter(Preceeding != 0)
 
 cat("Training data loaded:", nrow(train_data), "rows\n")
 
-# Load Testing Data with only required columns
-cat("Loading testing data...\n")
+# Load Testing Data, remove unneeded columns
+cat("Loading testing data\n")
 test_data <- read_csv(
   "TrajectoryData/0820am-0835am.csv",
   col_types = cols_only(
@@ -95,7 +86,7 @@ test_data <- read_csv(
   )
 )
 
-# Filter out rows with no preceding vehicle
+# Remove vehicles with no vehicle ahead
 test_data <- test_data %>%
   filter(Preceeding != 0)
 
@@ -107,14 +98,13 @@ cat("Testing data loaded:", nrow(test_data), "rows\n")
 ## 3.1 Training Data Feature Engineering
 
 ```{r train-feature-engineering}
-cat("Engineering features for training data...\n")
+cat("Engineering features for training data\n")
 
-# NGSIM data is at 10 Hz (10 frames/sec)
-# 2 seconds ahead = 20 frames
+# NGSIM data is at 10 Hz --> 2s = 20 frames
 DELTA_T_FRAMES <- 20
 TTC_THRESHOLD <- 4.0
 
-# Self-join to get current features
+# Self-join
 train_features <- train_data %>%
   rename(
     Vehicle_ID_Subject = Vehicle_ID,
@@ -138,8 +128,8 @@ train_features <- train_data %>%
     TTC_current = Actual_Gap / Relative_Speed
   )
 
-# Self-join to get future TTC for label construction
-# For each observation at time t, get TTC at time t + DELTA_T_FRAMES
+# Self-join for future TTC
+# At time t, get TTC at time (t + DELTA_T_FRAMES)
 train_future <- train_features %>%
   select(Vehicle_ID_Subject, Frame_ID, Preceeding_ID, TTC_current) %>%
   mutate(Frame_ID_past = Frame_ID - DELTA_T_FRAMES) %>%
