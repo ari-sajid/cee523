@@ -26,6 +26,10 @@ library(caret)
 library(pROC)
 library(ggplot2)
 library(zoo)
+library(tidyr)
+library(gridExtra)
+library(grid)
+library(reshape2)
 
 # Set seed for reproducibility
 set.seed(123)
@@ -258,6 +262,120 @@ cat("\n=== TESTING DATA SUMMARY ===\n")
 summary(test_processed %>% select(v_Vel, v_Acc, Space_Hdwy, Relative_Speed, TTC_current))
 ```
 
+## 3.4 Exploratory Visualizations
+
+```{r feature-distributions, fig.width=12, fig.height=8}
+# Feature distributions
+train_long <- train_processed %>%
+  select(v_Vel, v_Acc, Space_Hdwy, Relative_Speed, TTC_current, is_high_risk) %>%
+  tidyr::pivot_longer(cols = -is_high_risk, names_to = "Feature", values_to = "Value") %>%
+  mutate(Risk = if_else(is_high_risk == 1, "High Risk", "Low Risk"))
+
+ggplot(train_long, aes(x = Value, fill = Risk)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity") +
+  facet_wrap(~ Feature, scales = "free", ncol = 2) +
+  scale_fill_manual(values = c("Low Risk" = "#2E7D32", "High Risk" = "#C62828")) +
+  labs(
+    title = "Feature Distributions by Risk Level",
+    x = "Value",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+```
+
+```{r correlation-heatmap, fig.width=8, fig.height=6}
+# Correlation heatmap
+cor_data <- train_processed %>%
+  select(v_Vel, v_Acc, Space_Hdwy, Relative_Speed, TTC_current, is_high_risk) %>%
+  cor(use = "complete.obs")
+
+cor_melted <- reshape2::melt(cor_data)
+
+ggplot(cor_melted, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", value)), color = "white", size = 3) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, limits = c(-1, 1)) +
+  labs(
+    title = "Feature Correlation Matrix",
+    x = "",
+    y = "",
+    fill = "Correlation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r class-balance, fig.width=8, fig.height=5}
+# Class balance visualization
+class_counts <- data.frame(
+  Dataset = rep(c("Training", "Testing"), each = 2),
+  Class = rep(c("Low Risk", "High Risk"), 2),
+  Count = c(
+    sum(train_processed$is_high_risk == 0),
+    sum(train_processed$is_high_risk == 1),
+    sum(test_processed$is_high_risk == 0),
+    sum(test_processed$is_high_risk == 1)
+  )
+)
+
+ggplot(class_counts, aes(x = Dataset, y = Count, fill = Class)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = Count), position = position_dodge(width = 0.9), vjust = -0.5) +
+  scale_fill_manual(values = c("Low Risk" = "#2E7D32", "High Risk" = "#C62828")) +
+  labs(
+    title = "Class Distribution in Training and Testing Sets",
+    y = "Number of Observations"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+```
+
+```{r feature-relationships, fig.width=12, fig.height=8}
+# Scatterplots of key relationships
+plot_data <- train_processed %>%
+  sample_n(min(5000, nrow(train_processed))) %>%
+  mutate(Risk = if_else(is_high_risk == 1, "High Risk", "Low Risk"))
+
+p1 <- ggplot(plot_data, aes(x = v_Vel, y = Space_Hdwy, color = Risk)) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  scale_color_manual(values = c("Low Risk" = "#2E7D32", "High Risk" = "#C62828")) +
+  labs(title = "Velocity vs Space Headway", x = "Velocity (ft/s)", y = "Space Headway (ft)") +
+  theme_minimal()
+
+p2 <- ggplot(plot_data, aes(x = Relative_Speed, y = Space_Hdwy, color = Risk)) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  scale_color_manual(values = c("Low Risk" = "#2E7D32", "High Risk" = "#C62828")) +
+  labs(title = "Relative Speed vs Space Headway", x = "Relative Speed (ft/s)", y = "Space Headway (ft)") +
+  theme_minimal()
+
+p3 <- ggplot(plot_data, aes(x = v_Acc, y = TTC_current, color = Risk)) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  scale_color_manual(values = c("Low Risk" = "#2E7D32", "High Risk" = "#C62828")) +
+  labs(title = "Acceleration vs Current TTC", x = "Acceleration (ft/s²)", y = "TTC Current (s)") +
+  theme_minimal()
+
+p4 <- ggplot(plot_data, aes(x = Relative_Speed, y = TTC_current, color = Risk)) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  scale_color_manual(values = c("Low Risk" = "#2E7D32", "High Risk" = "#C62828")) +
+  labs(title = "Relative Speed vs Current TTC", x = "Relative Speed (ft/s)", y = "TTC Current (s)") +
+  theme_minimal()
+
+gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 2,
+                        top = grid::textGrob("Feature Relationships",
+                                            gp = grid::gpar(fontsize = 16, fontface = "bold")))
+```
+
 # 4. Modeling
 
 ```{r model-training}
@@ -272,6 +390,43 @@ model_full <- glm(
 
 cat("\n=== MODEL SUMMARY ===\n")
 summary(model_full)
+```
+
+## 4.2 Model Coefficients Visualization
+
+```{r coefficient-plot, fig.width=10, fig.height=6}
+# Extract coefficients and confidence intervals
+coef_data <- as.data.frame(summary(model_full)$coefficients)
+coef_data$Variable <- rownames(coef_data)
+colnames(coef_data) <- c("Estimate", "SE", "z_value", "p_value", "Variable")
+
+# Calculate 95% CI
+coef_data <- coef_data %>%
+  filter(Variable != "(Intercept)") %>%
+  mutate(
+    CI_lower = Estimate - 1.96 * SE,
+    CI_upper = Estimate + 1.96 * SE,
+    Significant = if_else(p_value < 0.05, "Yes", "No")
+  )
+
+ggplot(coef_data, aes(x = reorder(Variable, Estimate), y = Estimate, color = Significant)) +
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2, size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c("No" = "gray60", "Yes" = "#D32F2F")) +
+  coord_flip() +
+  labs(
+    title = "Logistic Regression Coefficients with 95% Confidence Intervals",
+    subtitle = "Variables with CIs not crossing zero are statistically significant",
+    x = "Predictor",
+    y = "Log-Odds Coefficient"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    legend.position = "top"
+  )
 ```
 
 # 5. Evaluation
@@ -301,7 +456,138 @@ cat(sprintf("Recall:    %.4f\n", cm_full$byClass["Sensitivity"]))
 cat(sprintf("AUC:       %.4f\n", auc_full))
 ```
 
-## 5.2 Class Distribution
+## 5.2 Confusion Matrix Visualization
+
+```{r confusion-matrix-heatmap, fig.width=8, fig.height=6}
+# Create confusion matrix data frame
+cm_table <- as.data.frame(cm_full$table)
+colnames(cm_table) <- c("Predicted", "Actual", "Count")
+
+# Add percentages
+cm_table <- cm_table %>%
+  mutate(
+    Percentage = Count / sum(Count) * 100,
+    Label = sprintf("%d\n(%.1f%%)", Count, Percentage)
+  )
+
+ggplot(cm_table, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "white", size = 1.5) +
+  geom_text(aes(label = Label), size = 6, fontface = "bold") +
+  scale_fill_gradient(low = "#E8F5E9", high = "#1B5E20") +
+  labs(
+    title = "Confusion Matrix - Test Set Performance",
+    x = "Predicted Class",
+    y = "Actual Class"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  )
+```
+
+## 5.3 Performance Metrics Visualization
+
+```{r metrics-bar-plot, fig.width=10, fig.height=6}
+# Create metrics data frame
+metrics_df <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "Specificity", "F1-Score"),
+  Value = c(
+    cm_full$overall["Accuracy"],
+    cm_full$byClass["Precision"],
+    cm_full$byClass["Sensitivity"],
+    cm_full$byClass["Specificity"],
+    cm_full$byClass["F1"]
+  )
+)
+
+ggplot(metrics_df, aes(x = reorder(Metric, Value), y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(aes(label = sprintf("%.3f", Value)), hjust = -0.1, size = 5, fontface = "bold") +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 1.1), breaks = seq(0, 1, 0.2)) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Model Performance Metrics",
+    x = "",
+    y = "Score"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "none",
+    axis.text = element_text(size = 11),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+## 5.4 Predicted Probability Distribution
+
+```{r probability-distribution, fig.width=10, fig.height=6}
+# Add predictions to test data
+test_with_pred <- test_processed %>%
+  mutate(
+    predicted_prob = prob_full,
+    Risk_Level = if_else(is_high_risk == 1, "High Risk", "Low Risk")
+  )
+
+ggplot(test_with_pred, aes(x = predicted_prob, fill = Risk_Level)) +
+  geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black", size = 1) +
+  annotate("text", x = 0.5, y = Inf, label = "Threshold = 0.5",
+           vjust = 1.5, hjust = -0.1, size = 4) +
+  scale_fill_manual(values = c("Low Risk" = "#2E7D32", "High Risk" = "#C62828")) +
+  labs(
+    title = "Distribution of Predicted Probabilities by Actual Risk Level",
+    x = "Predicted Probability of High Risk",
+    y = "Count",
+    fill = "Actual Class"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+```
+
+## 5.5 Calibration Curve
+
+```{r calibration-curve, fig.width=8, fig.height=6}
+# Create calibration bins
+test_calibration <- test_with_pred %>%
+  mutate(
+    prob_bin = cut(predicted_prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)
+  ) %>%
+  group_by(prob_bin) %>%
+  summarise(
+    mean_predicted = mean(predicted_prob, na.rm = TRUE),
+    mean_observed = mean(is_high_risk, na.rm = TRUE),
+    n = n()
+  ) %>%
+  filter(!is.na(prob_bin), n > 10)
+
+ggplot(test_calibration, aes(x = mean_predicted, y = mean_observed)) +
+  geom_point(aes(size = n), alpha = 0.6, color = "#1976D2") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red", size = 1) +
+  geom_smooth(method = "loess", se = TRUE, color = "#0D47A1", fill = "#BBDEFB") +
+  scale_size_continuous(name = "Sample Size") +
+  labs(
+    title = "Calibration Curve",
+    subtitle = "Perfect calibration follows the diagonal line",
+    x = "Mean Predicted Probability",
+    y = "Observed Frequency"
+  ) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10)
+  )
+```
+
+## 5.6 Class Distribution
 
 ```{r class-distribution}
 cat("\n=== CLASS DISTRIBUTION ===\n")
@@ -314,7 +600,7 @@ cat(sprintf("\nBaseline (majority class): %.4f\n", baseline_acc))
 cat(sprintf("Model improvement:         %.4f\n", cm_full$overall["Accuracy"] - baseline_acc))
 ```
 
-## 5.3 ROC Curve
+## 5.7 ROC Curve
 
 ```{r roc-curve, fig.width=8, fig.height=6}
 # Plot ROC curve
@@ -324,15 +610,22 @@ roc_data <- data.frame(
 )
 
 ggplot(roc_data, aes(x = FPR, y = TPR)) +
-  geom_line(color = "blue", size = 1.2) +
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  geom_line(color = "#1976D2", size = 1.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50", size = 1) +
+  geom_ribbon(aes(ymin = 0, ymax = TPR), fill = "#1976D2", alpha = 0.2) +
+  annotate("text", x = 0.7, y = 0.3,
+           label = sprintf("AUC = %.4f", auc_full),
+           size = 6, fontface = "bold", color = "#0D47A1") +
   labs(
-    title = sprintf("ROC Curve (AUC = %.4f)", auc_full),
-    x = "False Positive Rate",
-    y = "True Positive Rate"
+    title = "Receiver Operating Characteristic (ROC) Curve",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)"
   ) +
+  coord_equal() +
   theme_minimal() +
-  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14)
+  )
 ```
 
 # 6. Prediction Horizon Sensitivity
@@ -410,6 +703,52 @@ for (delta_t in horizons) {
 horizon_comparison <- do.call(rbind, horizon_results)
 rownames(horizon_comparison) <- NULL
 print(horizon_comparison)
+```
+
+## 6.2 Horizon Sensitivity Visualization
+
+```{r horizon-plots, fig.width=12, fig.height=8}
+# Reshape for plotting
+horizon_long <- horizon_comparison %>%
+  tidyr::pivot_longer(cols = c(Accuracy, Precision, Recall, AUC),
+                      names_to = "Metric", values_to = "Value")
+
+# Line plot
+p1 <- ggplot(horizon_long, aes(x = Delta_t_sec, y = Value, color = Metric, group = Metric)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  scale_x_continuous(breaks = c(1, 2, 3)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Model Performance Across Prediction Horizons",
+    x = "Prediction Horizon Δt (seconds)",
+    y = "Score"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+
+# Bar plot
+p2 <- ggplot(horizon_long, aes(x = factor(Delta_t_sec), y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  geom_text(aes(label = sprintf("%.3f", Value)),
+            position = position_dodge(width = 0.7), vjust = -0.5, size = 3) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(
+    title = "Performance Metrics by Prediction Horizon",
+    x = "Prediction Horizon Δt (seconds)",
+    y = "Score"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+
+gridExtra::grid.arrange(p1, p2, ncol = 1)
 ```
 
 # 7. Temporal Aggregation Features
@@ -495,6 +834,88 @@ cat("\n=== BASELINE VS ENHANCED MODEL ===\n")
 print(rolling_comparison)
 ```
 
+## 7.3 Rolling Features Comparison Visualization
+
+```{r rolling-visualizations, fig.width=12, fig.height=10}
+# Metrics comparison
+rolling_long <- rolling_comparison %>%
+  tidyr::pivot_longer(cols = c(Accuracy, Precision, Recall, AUC),
+                      names_to = "Metric", values_to = "Value")
+
+p1 <- ggplot(rolling_long, aes(x = Metric, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  geom_text(aes(label = sprintf("%.4f", Value)),
+            position = position_dodge(width = 0.7), vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c("Baseline (instantaneous)" = "#757575",
+                                "Enhanced (+ rolling features)" = "#1976D2")) +
+  labs(
+    title = "Baseline vs Enhanced Model Performance",
+    y = "Score"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+
+# Coefficient comparison
+coef_baseline <- as.data.frame(summary(model_baseline)$coefficients)
+coef_baseline$Variable <- rownames(coef_baseline)
+coef_baseline$Model <- "Baseline"
+coef_baseline <- coef_baseline %>% filter(Variable != "(Intercept)")
+
+coef_enhanced <- as.data.frame(summary(model_enhanced)$coefficients)
+coef_enhanced$Variable <- rownames(coef_enhanced)
+coef_enhanced$Model <- "Enhanced"
+coef_enhanced <- coef_enhanced %>% filter(Variable != "(Intercept)")
+
+coef_combined <- rbind(
+  coef_baseline %>% select(Variable, Estimate, Model),
+  coef_enhanced %>% select(Variable, Estimate, Model)
+)
+
+p2 <- ggplot(coef_combined, aes(x = reorder(Variable, Estimate), y = Estimate, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  coord_flip() +
+  scale_fill_manual(values = c("Baseline" = "#757575", "Enhanced" = "#1976D2")) +
+  labs(
+    title = "Coefficient Comparison: Baseline vs Enhanced",
+    x = "Variable",
+    y = "Coefficient Estimate"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+
+# Rolling feature example
+set.seed(123)
+sample_vehicle <- test_rolling %>%
+  arrange(Vehicle_ID, Frame_ID) %>%
+  filter(Vehicle_ID == first(unique(Vehicle_ID)[1])) %>%
+  head(100)
+
+p3 <- ggplot(sample_vehicle, aes(x = Frame_ID)) +
+  geom_line(aes(y = v_Vel, color = "Instantaneous"), size = 1) +
+  geom_line(aes(y = v_Vel_roll, color = "Rolling Mean"), size = 1) +
+  scale_color_manual(values = c("Instantaneous" = "#757575", "Rolling Mean" = "#1976D2")) +
+  labs(
+    title = "Example: Instantaneous vs Rolling Mean Velocity",
+    x = "Frame ID",
+    y = "Velocity (ft/s)",
+    color = ""
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    legend.position = "top"
+  )
+
+gridExtra::grid.arrange(p1, p2, p3, ncol = 1, heights = c(1, 1.2, 0.8))
+```
+
 # 8. Vehicle Class Segmentation
 
 ```{r vehicle-class-analysis}
@@ -566,6 +987,98 @@ if (length(high_fnr_classes) > 0) {
   cat(sprintf("Classes with high FNR (under-predicted as high-risk): %s\n",
               paste(high_fnr_classes, collapse = ", ")))
 }
+```
+
+## 8.2 Vehicle Class Visualization
+
+```{r vehicle-class-plots, fig.width=12, fig.height=10}
+# Error rates by class
+error_long <- class_comparison %>%
+  select(v_Class, FPR, FNR) %>%
+  tidyr::pivot_longer(cols = c(FPR, FNR), names_to = "Error_Type", values_to = "Rate")
+
+p1 <- ggplot(error_long, aes(x = factor(v_Class), y = Rate, fill = Error_Type)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  geom_text(aes(label = sprintf("%.3f", Rate)),
+            position = position_dodge(width = 0.7), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("FPR" = "#FF6F00", "FNR" = "#C62828"),
+                    labels = c("False Positive Rate", "False Negative Rate")) +
+  labs(
+    title = "Error Rates by Vehicle Class",
+    x = "Vehicle Class",
+    y = "Error Rate",
+    fill = ""
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+
+# Precision and Recall by class
+perf_long <- class_comparison %>%
+  select(v_Class, Precision, Recall) %>%
+  tidyr::pivot_longer(cols = c(Precision, Recall), names_to = "Metric", values_to = "Value")
+
+p2 <- ggplot(perf_long, aes(x = factor(v_Class), y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  geom_text(aes(label = sprintf("%.3f", Value)),
+            position = position_dodge(width = 0.7), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("Precision" = "#1976D2", "Recall" = "#388E3C")) +
+  labs(
+    title = "Precision and Recall by Vehicle Class",
+    x = "Vehicle Class",
+    y = "Score",
+    fill = ""
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "top"
+  )
+
+# Sample size by class
+p3 <- ggplot(class_comparison, aes(x = factor(v_Class), y = n_samples, fill = factor(v_Class))) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_text(aes(label = n_samples), vjust = -0.5, size = 4) +
+  scale_fill_brewer(palette = "Set3") +
+  labs(
+    title = "Sample Size by Vehicle Class",
+    x = "Vehicle Class",
+    y = "Number of Samples"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "none"
+  )
+
+# Confusion matrix heatmap by class
+cm_class_long <- class_comparison %>%
+  select(v_Class, TP, FP, TN, FN) %>%
+  tidyr::pivot_longer(cols = c(TP, FP, TN, FN), names_to = "Type", values_to = "Count") %>%
+  mutate(
+    Predicted = if_else(Type %in% c("TP", "FP"), "Positive", "Negative"),
+    Actual = if_else(Type %in% c("TP", "FN"), "Positive", "Negative")
+  )
+
+p4 <- ggplot(cm_class_long, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "white", size = 1) +
+  geom_text(aes(label = Count), size = 3, fontface = "bold") +
+  facet_wrap(~ v_Class, ncol = 3) +
+  scale_fill_gradient(low = "#E3F2FD", high = "#0D47A1") +
+  labs(
+    title = "Confusion Matrices by Vehicle Class",
+    x = "Predicted",
+    y = "Actual"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    strip.text = element_text(face = "bold")
+  )
+
+gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 1, heights = c(1, 1, 0.8, 1.2))
 ```
 
 # 9. Conclusion
